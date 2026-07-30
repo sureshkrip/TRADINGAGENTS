@@ -140,6 +140,29 @@ def analyze(req: AnalyzeRequest) -> AnalyzeAccepted:
     return AnalyzeAccepted(job_id=job_id, status="queued")
 
 
+_SUMMARY_FIELDS = (
+    "job_id", "status", "request", "created_at", "started_at", "finished_at", "error",
+)
+
+
+@app.get("/jobs")
+def list_jobs(status: str | None = None) -> dict[str, Any]:
+    """List all jobs (compact summaries, newest first).
+
+    Pass ``?status=done`` (or queued/running/error) to filter. The full result
+    body is omitted here to keep the list light — fetch a specific job via
+    ``GET /analyze/{job_id}`` for its ``result``. ``done`` and ``error`` are the
+    two terminal ("finished") states.
+    """
+    with _JOBS_LOCK:
+        jobs = list(_JOBS.values())
+    if status is not None:
+        jobs = [j for j in jobs if j["status"] == status]
+    summaries = [{k: j[k] for k in _SUMMARY_FIELDS if k in j} for j in jobs]
+    summaries.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+    return {"count": len(summaries), "jobs": summaries}
+
+
 @app.get("/analyze/{job_id}")
 def get_job(job_id: str) -> dict[str, Any]:
     """Return a job's status and, once ``status == "done"``, its result."""
