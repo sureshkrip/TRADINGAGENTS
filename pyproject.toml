@@ -44,9 +44,17 @@ dev = [
 bedrock = [
     "langchain-aws>=1.5.0",
 ]
+# Web-service wrapper (FastAPI + uvicorn). Optional so the core/CLI install
+# stays lean: pip install "tradingagents[web]". Powers `tradingagents-web` and
+# the Coolify deployment (see Dockerfile.web / docker-compose.coolify.yml).
+web = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+]
 
 [project.scripts]
 tradingagents = "cli.main:app"
+tradingagents-web = "tradingagents.web.server:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]

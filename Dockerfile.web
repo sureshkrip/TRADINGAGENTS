@@ -1,0 +1,33 @@
+# Web-service image: same build as the CLI image, but installs the [web] extra
+# and serves the FastAPI app instead of dropping into the interactive CLI.
+# Used by docker-compose.coolify.yml. Build: docker build -f Dockerfile.web .
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+WORKDIR /build
+COPY . .
+RUN pip install --no-cache-dir ".[web]"
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+RUN useradd --create-home appuser \
+ && install -d -m 0755 -o appuser -g appuser /home/appuser/.tradingagents
+USER appuser
+WORKDIR /home/appuser/app
+
+COPY --from=builder --chown=appuser:appuser /build .
+
+# Serve the FastAPI app. Host/port are overridable via TRADINGAGENTS_WEB_* env.
+EXPOSE 8000
+ENTRYPOINT ["tradingagents-web"]

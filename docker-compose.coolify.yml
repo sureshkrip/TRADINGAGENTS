@@ -1,0 +1,37 @@
+# Coolify deployment: TradingAgents as a web service (FastAPI + uvicorn).
+#
+# In Coolify: New Resource -> Docker Compose -> point at this repo, then set the
+# "Docker Compose Location" to /docker-compose.coolify.yml. Set your API keys and
+# any TRADINGAGENTS_* overrides as Environment Variables in the Coolify UI
+# (do NOT commit an .env). Coolify injects them into the container.
+#
+# Coolify routes your domain to the container's exposed port (8000). If asked for
+# a port, use 8000.
+services:
+  tradingagents-web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    restart: unless-stopped
+    environment:
+      # Bind inside the container; Coolify's proxy handles TLS/domain.
+      - TRADINGAGENTS_WEB_HOST=0.0.0.0
+      - TRADINGAGENTS_WEB_PORT=8000
+      # Uncomment/override provider + model settings here, or (preferred) set
+      # them as Coolify Environment Variables so secrets stay out of git:
+      #   OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY, FINNHUB_API_KEY, ...
+      #   TRADINGAGENTS_LLM_PROVIDER, TRADINGAGENTS_DEEP_THINK_LLM, ...
+    expose:
+      - "8000"
+    volumes:
+      # Persist results, cache, and agent memory across redeploys.
+      - tradingagents_data:/home/appuser/.tradingagents
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 40s
+
+volumes:
+  tradingagents_data:
