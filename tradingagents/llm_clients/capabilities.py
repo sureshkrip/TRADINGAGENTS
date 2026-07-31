@@ -82,6 +82,21 @@ _MINIMAX_THINKING = ModelCapabilities(
     requires_reasoning_split=True,
 )
 
+# Moonshot's Kimi "thinking" models (K2 Thinking, K2.5, K3, and newer) reject the
+# tool_choice parameter whenever thinking is enabled: the API returns
+# 400 "tool_choice 'specified' is incompatible with thinking enabled". Same shape
+# as the DeepSeek/MiniMax thinking-mode quirk — bind the schema as a tool but let
+# NormalizedChatOpenAI.with_structured_output suppress the tool_choice kwarg.
+# Moonshot supports response_format json_object, but function_calling matches what
+# the agent factories request, and suppressing tool_choice is harmless even for
+# the non-thinking Kimi instruct variants that this pattern also catches.
+_KIMI_THINKING = ModelCapabilities(
+    supports_tool_choice=False,
+    supports_json_mode=True,
+    supports_json_schema=False,
+    preferred_structured_method="function_calling",
+)
+
 _DEFAULT = ModelCapabilities(
     supports_tool_choice=True,
     supports_json_mode=True,
@@ -113,6 +128,9 @@ _BY_PATTERN: list[tuple[re.Pattern[str], ModelCapabilities]] = [
     (re.compile(r"^deepseek-v\d"), _DEEPSEEK_THINKING),
     (re.compile(r"^deepseek-reasoner"), _DEEPSEEK_THINKING),
     (re.compile(r"^MiniMax-M\d"), _MINIMAX_THINKING),
+    # Kimi K2/K2.5/K3 (and future kimi-kN) thinking models — reject tool_choice.
+    (re.compile(r"^kimi-k[2-9]"), _KIMI_THINKING),
+    (re.compile(r"^kimi-thinking"), _KIMI_THINKING),
 ]
 
 
