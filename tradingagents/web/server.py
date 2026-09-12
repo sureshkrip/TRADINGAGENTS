@@ -285,6 +285,16 @@ def index() -> str:
     return _INDEX_HTML
 
 
+@app.get("/funnel", response_class=HTMLResponse)
+def funnel_page() -> str:
+    """Browser UI for the screening funnel: submit a run, watch it, see the picks.
+
+    Served on GET; the JSON API lives on POST /funnel and GET /funnel/{job_id},
+    which this page calls. (Same path, different methods.)
+    """
+    return _FUNNEL_HTML
+
+
 _INDEX_HTML = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -301,7 +311,7 @@ _INDEX_HTML = """<!doctype html>
   .muted { opacity: .7; font-size: .9rem; }
 </style></head><body>
 <h1>TradingAgents</h1>
-<p class="muted">Runs the multi-agent pipeline for a ticker on a historical date. A run can take several minutes.</p>
+<p class="muted">Runs the multi-agent pipeline for a ticker on a historical date. A run can take several minutes. &middot; <a href="/funnel">Screen a whole universe &rarr;</a></p>
 <label for="ticker">Ticker</label>
 <input id="ticker" value="NVDA">
 <label for="date">Date (YYYY-MM-DD)</label>
@@ -329,6 +339,101 @@ document.getElementById('go').onclick = async () => {
     if (j.status === 'done') { out.textContent = 'Decision: ' + j.result.decision + '\\n\\n' + (j.result.final_trade_decision || ''); break; }
     if (j.status === 'error') { out.textContent = 'Failed: ' + j.error; break; }
     out.textContent = 'Status: ' + j.status + ' ...';
+  }
+};
+</script>
+</body></html>"""
+
+
+_FUNNEL_HTML = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TradingAgents · Funnel</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 60rem; margin: 3rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.4rem; } h2 { font-size: 1.1rem; margin-top: 1.75rem; }
+  label { display: block; margin: .6rem 0 .2rem; font-weight: 600; font-size: .9rem; }
+  input, button { font: inherit; padding: .5rem .6rem; }
+  .row { display: flex; gap: 1rem; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 8rem; }
+  input { width: 100%; box-sizing: border-box; }
+  button { margin-top: 1rem; cursor: pointer; }
+  .muted { opacity: .7; font-size: .9rem; }
+  #status { margin: 1.25rem 0; font-weight: 600; }
+  table { border-collapse: collapse; width: 100%; margin-top: .5rem; font-size: .9rem; }
+  th, td { text-align: left; padding: .4rem .5rem; border-bottom: 1px solid rgba(127,127,127,.25); vertical-align: top; }
+  th { font-size: .8rem; text-transform: uppercase; opacity: .7; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .tick { font-weight: 700; }
+  .flag { color: #c0392b; }
+  .tag { display: inline-block; padding: .1rem .5rem; border-radius: .5rem; font-size: .8rem; font-weight: 600; }
+  .BUY { background: rgba(39,174,96,.18); } .HOLD { background: rgba(127,127,127,.18); }
+  .SELL { background: rgba(192,57,43,.18); } .UNKNOWN, .FAILED { background: rgba(241,196,15,.18); }
+  .paths { margin-top: 1.5rem; font-size: .85rem; }
+</style></head><body>
+<h1>TradingAgents · Screening funnel</h1>
+<p class="muted">Sources a universe, ranks it (quant screen), triages with a cheap LLM, then runs the full multi-agent analysis on the shortlist. The deep stage is slow &mdash; a run can take many minutes. &middot; <a href="/">Single ticker &rarr;</a></p>
+<div class="row">
+  <div><label for="date">As-of date</label><input id="date" value="2024-05-10" placeholder="YYYY-MM-DD"></div>
+  <div><label for="top_screen">Top screen</label><input id="top_screen" type="number" min="1" placeholder="60"></div>
+  <div><label for="top_triage">Top triage</label><input id="top_triage" type="number" min="1" placeholder="8"></div>
+  <div><label for="max_deep">Max deep</label><input id="max_deep" type="number" min="1" placeholder="5"></div>
+</div>
+<button id="go">Run funnel</button>
+<div id="status"></div>
+<div id="results"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const status = $('status'), results = $('results');
+const BUCKETS = ['BUY','HOLD','SELL','UNKNOWN','FAILED'];
+const TITLES = {BUY:'✅ Buy / Overweight — the picks', HOLD:'⏸️ Hold / Neutral', SELL:'❌ Sell / Avoid', UNKNOWN:'❔ Unclassified', FAILED:'⚠️ Failed to analyze'};
+
+function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function numOrBlank(v){ return (v==null||isNaN(v)) ? '' : Math.round(v); }
+
+function render(result){
+  const picks = result.picks || [];
+  const by = Object.fromEntries(BUCKETS.map(b => [b, []]));
+  for (const p of picks) (by[p.bucket] || by.UNKNOWN).push(p);
+  let html = `<p class="muted">universe ${result.universe_size} → screened ${result.screened} → triaged ${result.triaged} → analyzed ${result.analyzed}</p>`;
+  for (const b of BUCKETS){
+    const rows = by[b]; if (!rows.length) continue;
+    html += `<h2>${TITLES[b]}</h2><table><thead><tr>`;
+    html += b==='FAILED'
+      ? '<th>Ticker</th><th>Error</th></tr></thead><tbody>'
+      : '<th>#</th><th>Ticker</th><th>Decision</th><th class="num">Triage</th><th class="num">Screen</th><th>Thesis</th><th>Red flag</th></tr></thead><tbody>';
+    rows.forEach((p,i) => {
+      html += b==='FAILED'
+        ? `<tr><td class="tick">${esc(p.ticker)}</td><td>${esc(p.error)}</td></tr>`
+        : `<tr><td class="num">${i+1}</td><td class="tick">${esc(p.ticker)}</td>`
+          + `<td><span class="tag ${esc(p.bucket)}">${esc(p.decision||'')}</span></td>`
+          + `<td class="num">${numOrBlank(p.triage_score)}</td><td class="num">${numOrBlank(p.screen_score)}</td>`
+          + `<td>${esc(p.thesis)}</td><td class="flag">${esc(p.red_flag||'')}</td></tr>`;
+    });
+    html += '</tbody></table>';
+  }
+  if (result.report_path) html += `<p class="paths muted">Report written to <code>${esc(result.report_path)}</code> (+ .csv)</p>`;
+  results.innerHTML = html;
+}
+
+$('go').onclick = async () => {
+  results.innerHTML = '';
+  const body = { date: $('date').value.trim() };
+  for (const k of ['top_screen','top_triage','max_deep']){ const v = $(k).value.trim(); if (v) body[k] = parseInt(v,10); }
+  status.textContent = 'Submitting…';
+  const r = await fetch('/funnel', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) { status.textContent = 'Error: ' + r.status + ' ' + await r.text(); return; }
+  const {job_id} = await r.json();
+  const t0 = Date.now();
+  while (true) {
+    await new Promise(res => setTimeout(res, 4000));
+    const j = await (await fetch('/funnel/' + job_id)).json();
+    const mins = Math.floor((Date.now()-t0)/60000), secs = Math.floor((Date.now()-t0)/1000)%60;
+    if (j.status === 'done') { status.textContent = `Done in ${mins}m${secs}s`; render(j.result); break; }
+    if (j.status === 'error') { status.textContent = 'Failed: ' + j.error; break; }
+    status.textContent = `Status: ${j.status} … (${mins}m${secs}s) — screening, triaging, then ~minutes per deep analysis`;
   }
 };
 </script>

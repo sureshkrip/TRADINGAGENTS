@@ -50,3 +50,16 @@ def test_funnel_unknown_job_404(client):
 def test_funnel_validates_positive_cutoffs(client):
     # top_screen must be >= 1
     assert client.post("/funnel", json={"date": "2024-05-10", "top_screen": 0}).status_code == 422
+
+
+@pytest.mark.unit
+def test_funnel_page_served_on_get(client):
+    r = client.get("/funnel")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    assert "Screening funnel" in r.text and "Run funnel" in r.text
+
+
+@pytest.mark.unit
+def test_index_links_to_funnel_page(client):
+    assert 'href="/funnel"' in client.get("/").text
