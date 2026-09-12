@@ -8,14 +8,16 @@ per-stage ``top_*`` counts can be overridden per call.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from tradingagents.dataflows.screen import ScreenResult, screen_universe
 from tradingagents.dataflows.universe import get_universe
 from tradingagents.funnel.batch import AnalysisResult, run_deep_analysis
-from tradingagents.funnel.report import build_report
+from tradingagents.funnel.report import build_report, results_to_picks
 from tradingagents.funnel.triage import TriageResult, triage_candidates
 
 logger = logging.getLogger(__name__)
@@ -34,6 +36,7 @@ class FunnelOutput:
     report_csv: str = ""
     report_path: str | None = None  # Markdown file, if written
     csv_path: str | None = None
+    run_json_path: str | None = None  # structured record for the history browser
 
 
 def _default_out_dir(trade_date: str) -> str:
@@ -96,10 +99,25 @@ def run_funnel(
         os.makedirs(target, exist_ok=True)
         out.report_path = os.path.join(target, "report.md")
         out.csv_path = os.path.join(target, "report.csv")
+        out.run_json_path = os.path.join(target, "run.json")
         with open(out.report_path, "w", encoding="utf-8") as fh:
             fh.write(report_md)
         with open(out.csv_path, "w", encoding="utf-8", newline="") as fh:
             fh.write(report_csv)
+        # Structured record powers the web history browser (view any past day's
+        # picks + write-ups). Persisted on the volume, so it survives restarts —
+        # unlike the in-memory job store.
+        record = {
+            "trade_date": trade_date,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "universe_size": len(universe),
+            "screened": len(screened),
+            "triaged": len(triaged),
+            "analyzed": len(analyzed),
+            "picks": results_to_picks(analyzed, include_reports=True),
+        }
+        with open(out.run_json_path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
         logger.info("Funnel: report written to %s", out.report_path)
 
     return out

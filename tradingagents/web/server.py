@@ -13,7 +13,9 @@ Or:           ``tradingagents-web``  (console script, see pyproject.toml)
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -236,6 +238,57 @@ def funnel(req: FunnelRequest) -> AnalyzeAccepted:
     return AnalyzeAccepted(job_id=job_id, status="queued")
 
 
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _funnel_runs_dir() -> str:
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    return os.path.join(DEFAULT_CONFIG["results_dir"], "funnel")
+
+
+# NOTE: these literal routes are declared BEFORE /funnel/{job_id} so "runs" is
+# matched here rather than captured as a job_id.
+@app.get("/funnel/runs")
+def list_funnel_runs() -> dict[str, Any]:
+    """List persisted funnel runs (dates, newest first) for the history browser.
+
+    Reads the on-disk archive (``<results_dir>/funnel/<date>/run.json``), so it
+    survives restarts — unlike the in-memory job store.
+    """
+    base = _funnel_runs_dir()
+    runs: list[dict[str, Any]] = []
+    if os.path.isdir(base):
+        for name in os.listdir(base):
+            record = os.path.join(base, name, "run.json")
+            if not os.path.isfile(record):
+                continue
+            entry = {"date": name}
+            try:
+                with open(record, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                entry["analyzed"] = data.get("analyzed")
+                entry["generated_at"] = data.get("generated_at")
+                entry["buys"] = sum(1 for p in data.get("picks", []) if p.get("bucket") == "BUY")
+            except (OSError, json.JSONDecodeError):
+                pass  # a malformed run.json shouldn't hide the rest of the history
+            runs.append(entry)
+    runs.sort(key=lambda r: r["date"], reverse=True)
+    return {"count": len(runs), "runs": runs}
+
+
+@app.get("/funnel/runs/{date}")
+def get_funnel_run(date: str) -> dict[str, Any]:
+    """Return one persisted run's full record (counts + picks + write-ups)."""
+    if not _DATE_RE.match(date):  # also blocks path traversal via the date param
+        raise HTTPException(status_code=400, detail="Invalid date (expected YYYY-MM-DD)")
+    record = os.path.join(_funnel_runs_dir(), date, "run.json")
+    if not os.path.isfile(record):
+        raise HTTPException(status_code=404, detail="No run for that date")
+    with open(record, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
 @app.get("/funnel/{job_id}")
 def get_funnel_job(job_id: str) -> dict[str, Any]:
     """Return a funnel job's status and, once done, its ranked picks + report paths."""
@@ -371,6 +424,11 @@ _FUNNEL_HTML = """<!doctype html>
   .BUY { background: rgba(39,174,96,.18); } .HOLD { background: rgba(127,127,127,.18); }
   .SELL { background: rgba(192,57,43,.18); } .UNKNOWN, .FAILED { background: rgba(241,196,15,.18); }
   .paths { margin-top: 1.5rem; font-size: .85rem; }
+  h3 { font-size: 1rem; margin-top: 1.25rem; }
+  details { margin: .4rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  details pre { white-space: pre-wrap; background: rgba(127,127,127,.12); padding: .75rem; border-radius: .4rem; font-size: .85rem; margin-top: .4rem; }
+  #history div { margin: .25rem 0; }
 </style></head><body>
 <h1>TradingAgents · Screening funnel</h1>
 <p class="muted">Sources a universe, ranks it (quant screen), triages with a cheap LLM, then runs the full multi-agent analysis on the shortlist. The deep stage is slow &mdash; a run can take many minutes. &middot; <a href="/">Single ticker &rarr;</a></p>
@@ -384,23 +442,27 @@ _FUNNEL_HTML = """<!doctype html>
 <div id="status"></div>
 <div id="results"></div>
 
+<h2>Past runs</h2>
+<div id="history" class="muted">Loading…</div>
+
 <script>
 const $ = id => document.getElementById(id);
-const status = $('status'), results = $('results');
+const status = $('status'), results = $('results'), history = $('history');
 const BUCKETS = ['BUY','HOLD','SELL','UNKNOWN','FAILED'];
 const TITLES = {BUY:'✅ Buy / Overweight — the picks', HOLD:'⏸️ Hold / Neutral', SELL:'❌ Sell / Avoid', UNKNOWN:'❔ Unclassified', FAILED:'⚠️ Failed to analyze'};
 
 function esc(s){ return (s==null?'':String(s)).replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 function numOrBlank(v){ return (v==null||isNaN(v)) ? '' : Math.round(v); }
 
-function render(result){
+function render(result, heading){
   const picks = result.picks || [];
   const by = Object.fromEntries(BUCKETS.map(b => [b, []]));
   for (const p of picks) (by[p.bucket] || by.UNKNOWN).push(p);
-  let html = `<p class="muted">universe ${result.universe_size} → screened ${result.screened} → triaged ${result.triaged} → analyzed ${result.analyzed}</p>`;
+  let html = heading ? `<h2>${esc(heading)}</h2>` : '';
+  html += `<p class="muted">universe ${result.universe_size} → screened ${result.screened} → triaged ${result.triaged} → analyzed ${result.analyzed}</p>`;
   for (const b of BUCKETS){
     const rows = by[b]; if (!rows.length) continue;
-    html += `<h2>${TITLES[b]}</h2><table><thead><tr>`;
+    html += `<h3>${TITLES[b]}</h3><table><thead><tr>`;
     html += b==='FAILED'
       ? '<th>Ticker</th><th>Error</th></tr></thead><tbody>'
       : '<th>#</th><th>Ticker</th><th>Decision</th><th class="num">Triage</th><th class="num">Screen</th><th>Thesis</th><th>Red flag</th></tr></thead><tbody>';
@@ -414,8 +476,33 @@ function render(result){
     });
     html += '</tbody></table>';
   }
-  if (result.report_path) html += `<p class="paths muted">Report written to <code>${esc(result.report_path)}</code> (+ .csv)</p>`;
+  const withReports = picks.filter(p => p.report);
+  if (withReports.length){
+    html += '<h3>Full write-ups</h3>';
+    for (const p of withReports)
+      html += `<details><summary>${esc(p.ticker)} — ${esc(p.decision||'')}</summary><pre>${esc(p.report)}</pre></details>`;
+  }
+  if (result.report_path) html += `<p class="paths muted">Saved to <code>${esc(result.report_path)}</code> (+ .csv, run.json)</p>`;
   results.innerHTML = html;
+  window.scrollTo(0,0);
+}
+
+async function loadHistory(){
+  try {
+    const {runs} = await (await fetch('/funnel/runs')).json();
+    if (!runs.length){ history.textContent = 'No past runs yet.'; return; }
+    history.innerHTML = runs.map(r =>
+      `<div><a href="#" data-date="${esc(r.date)}">${esc(r.date)}</a>`
+      + ` <span class="muted">— ${r.analyzed ?? '?'} analyzed, ${r.buys ?? 0} buys</span></div>`).join('');
+    history.querySelectorAll('a[data-date]').forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      const d = a.getAttribute('data-date');
+      status.textContent = 'Loading ' + d + ' …';
+      const rec = await (await fetch('/funnel/runs/' + d)).json();
+      status.textContent = 'Showing run for ' + d;
+      render(rec, 'Funnel run — ' + d);
+    });
+  } catch(err){ history.textContent = 'Could not load history.'; }
 }
 
 $('go').onclick = async () => {
@@ -431,11 +518,13 @@ $('go').onclick = async () => {
     await new Promise(res => setTimeout(res, 4000));
     const j = await (await fetch('/funnel/' + job_id)).json();
     const mins = Math.floor((Date.now()-t0)/60000), secs = Math.floor((Date.now()-t0)/1000)%60;
-    if (j.status === 'done') { status.textContent = `Done in ${mins}m${secs}s`; render(j.result); break; }
+    if (j.status === 'done') { status.textContent = `Done in ${mins}m${secs}s`; render(j.result); loadHistory(); break; }
     if (j.status === 'error') { status.textContent = 'Failed: ' + j.error; break; }
     status.textContent = `Status: ${j.status} … (${mins}m${secs}s) — screening, triaging, then ~minutes per deep analysis`;
   }
 };
+
+loadHistory();
 </script>
 </body></html>"""
 

@@ -28,6 +28,31 @@ _SELL_WORDS = ("sell", "underweight", "short", "reduce", "bearish", "avoid", "ex
 _HOLD_WORDS = ("hold", "neutral", "watch", "market perform", "market-weight", "equal")
 
 
+def results_to_picks(results: list[AnalysisResult], *, include_reports: bool = False) -> list[dict]:
+    """Flatten analysis results into JSON-friendly pick dicts.
+
+    Shared by the web job result and the on-disk run record so both expose the
+    same shape. ``include_reports`` adds the full write-up per pick (used for the
+    persisted archive, omitted from the light live-poll payload).
+    """
+    picks: list[dict] = []
+    for r in results:
+        pick = {
+            "ticker": r.ticker,
+            "bucket": classify_decision(r.decision) if r.error is None else "FAILED",
+            "decision": r.decision,
+            "triage_score": r.triage_score,
+            "screen_score": r.screen_score,
+            "thesis": r.thesis,
+            "red_flag": r.red_flag,
+            "error": r.error,
+        }
+        if include_reports:
+            pick["report"] = r.report
+        picks.append(pick)
+    return picks
+
+
 def classify_decision(decision: str | None) -> str:
     """Map a free-text decision to one of BUY / SELL / HOLD / UNKNOWN.
 

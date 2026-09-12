@@ -100,15 +100,34 @@ def test_run_funnel_chains_stages_and_writes(monkeypatch, tmp_path):
     monkeypatch.setattr(pl, "triage_candidates", lambda scr, top_n=None: ["t-AAA"])
     monkeypatch.setattr(
         pl, "run_deep_analysis",
-        lambda tri, date, atype, max_deep=None: [_res("AAA", "BUY")],
+        lambda tri, date, atype, max_deep=None: [_res("AAA", "BUY", report="WRITEUP-AAA")],
     )
 
     out = pl.run_funnel("2024-05-10", out_dir=str(tmp_path))
     assert out.universe_size == 3
-    assert out.report_path and out.csv_path
+    assert out.report_path and out.csv_path and out.run_json_path
     written = (tmp_path / "report.md").read_text(encoding="utf-8")
     assert "**AAA**" in written and "2024-05-10" in written
     assert (tmp_path / "report.csv").read_text(encoding="utf-8").startswith("ticker,bucket")
+
+
+@pytest.mark.unit
+def test_run_funnel_persists_structured_run_json(monkeypatch, tmp_path):
+    import json
+    monkeypatch.setattr(pl, "get_universe", lambda: ["AAA", "BBB", "CCC"])
+    monkeypatch.setattr(pl, "screen_universe", lambda uni, top_n=None: ["s"])
+    monkeypatch.setattr(pl, "triage_candidates", lambda scr, top_n=None: ["t"])
+    monkeypatch.setattr(
+        pl, "run_deep_analysis",
+        lambda tri, date, atype, max_deep=None: [_res("AAA", "BUY", report="WRITEUP-AAA")],
+    )
+    pl.run_funnel("2024-05-10", out_dir=str(tmp_path))
+    rec = json.loads((tmp_path / "run.json").read_text(encoding="utf-8"))
+    assert rec["trade_date"] == "2024-05-10" and rec["universe_size"] == 3
+    assert rec["generated_at"]  # timestamp present
+    pick = rec["picks"][0]
+    assert pick["ticker"] == "AAA" and pick["bucket"] == "BUY"
+    assert pick["report"] == "WRITEUP-AAA"   # full write-up archived for later viewing
 
 
 @pytest.mark.unit

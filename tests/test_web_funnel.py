@@ -63,3 +63,55 @@ def test_funnel_page_served_on_get(client):
 @pytest.mark.unit
 def test_index_links_to_funnel_page(client):
     assert 'href="/funnel"' in client.get("/").text
+
+
+def _seed_run(base, date, picks):
+    import json
+    import os
+    d = os.path.join(base, date)
+    os.makedirs(d, exist_ok=True)
+    rec = {"trade_date": date, "generated_at": date + "T00:00:00+00:00",
+           "universe_size": 100, "screened": 10, "triaged": 3, "analyzed": len(picks),
+           "picks": picks}
+    with open(os.path.join(d, "run.json"), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+
+
+@pytest.mark.unit
+def test_list_runs_reads_archive_newest_first(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    _seed_run(tmp_path, "2024-05-09", [{"ticker": "A", "bucket": "BUY"}])
+    _seed_run(tmp_path, "2024-05-10", [{"ticker": "B", "bucket": "HOLD"}, {"ticker": "C", "bucket": "BUY"}])
+    r = client.get("/funnel/runs")
+    assert r.status_code == 200
+    runs = r.json()["runs"]
+    assert [x["date"] for x in runs] == ["2024-05-10", "2024-05-09"]  # newest first
+    assert runs[0]["analyzed"] == 2 and runs[0]["buys"] == 1
+
+
+@pytest.mark.unit
+def test_get_run_returns_full_record(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    _seed_run(tmp_path, "2024-05-10", [{"ticker": "B", "bucket": "BUY", "report": "WRITEUP"}])
+    r = client.get("/funnel/runs/2024-05-10")
+    assert r.status_code == 200
+    assert r.json()["picks"][0]["report"] == "WRITEUP"
+
+
+@pytest.mark.unit
+def test_get_run_unknown_date_404(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    assert client.get("/funnel/runs/2099-01-01").status_code == 404
+
+
+@pytest.mark.unit
+def test_get_run_rejects_bad_date_and_traversal(client):
+    assert client.get("/funnel/runs/not-a-date").status_code == 400
+    assert client.get("/funnel/runs/../etc").status_code in (400, 404)
+
+
+@pytest.mark.unit
+def test_runs_route_not_shadowed_by_job_id(client, monkeypatch, tmp_path):
+    # "runs" must hit the history endpoint, not be treated as a job_id (404 job).
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    assert client.get("/funnel/runs").status_code == 200
