@@ -1,0 +1,105 @@
+"""End-to-end funnel orchestrator: universe → screen → triage → analyze → report.
+
+``run_funnel()`` chains all four stages and, by default, writes the ranked
+Markdown + CSV report to disk. It's the single entry point a batch job or a
+scheduled task calls; each stage's own knobs (env vars) still apply, and the
+per-stage ``top_*`` counts can be overridden per call.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from dataclasses import dataclass, field
+
+from tradingagents.dataflows.screen import ScreenResult, screen_universe
+from tradingagents.dataflows.universe import get_universe
+from tradingagents.funnel.batch import AnalysisResult, run_deep_analysis
+from tradingagents.funnel.report import build_report
+from tradingagents.funnel.triage import TriageResult, triage_candidates
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FunnelOutput:
+    """Everything the funnel produced, for the caller to persist or inspect."""
+
+    trade_date: str
+    universe_size: int
+    screened: list[ScreenResult] = field(default_factory=list)
+    triaged: list[TriageResult] = field(default_factory=list)
+    analyzed: list[AnalysisResult] = field(default_factory=list)
+    report_md: str = ""
+    report_csv: str = ""
+    report_path: str | None = None  # Markdown file, if written
+    csv_path: str | None = None
+
+
+def _default_out_dir(trade_date: str) -> str:
+    """``<results_dir>/funnel/<trade_date>`` — sits alongside per-run agent logs."""
+    from tradingagents.default_config import DEFAULT_CONFIG
+
+    return os.path.join(DEFAULT_CONFIG["results_dir"], "funnel", trade_date)
+
+
+def run_funnel(
+    trade_date: str,
+    asset_type: str = "stock",
+    *,
+    top_screen: int | None = None,
+    top_triage: int | None = None,
+    max_deep: int | None = None,
+    write: bool = True,
+    out_dir: str | None = None,
+) -> FunnelOutput:
+    """Run the full funnel for ``trade_date`` and return (and optionally write) the report.
+
+    Args:
+        trade_date: as-of date ``YYYY-MM-DD`` for the analysis.
+        asset_type: ``"stock"`` (default) or ``"crypto"``.
+        top_screen / top_triage / max_deep: per-stage cutoffs; each falls back to
+            its stage's env-var default when None.
+        write: write the Markdown + CSV report to ``out_dir`` (default on).
+        out_dir: destination dir; defaults to ``<results_dir>/funnel/<date>``.
+
+    Short-circuits cleanly: if a stage yields nothing (empty universe, nothing
+    clears the screen/triage), later stages get an empty list and the report
+    still renders — you get a report that says "0 picks" rather than an error.
+    """
+    universe = get_universe()
+    logger.info("Funnel: universe=%d tickers", len(universe))
+
+    screened = screen_universe(universe, top_n=top_screen)
+    logger.info("Funnel: screened -> %d survivors", len(screened))
+
+    triaged = triage_candidates(screened, top_n=top_triage)
+    logger.info("Funnel: triaged -> %d shortlisted", len(triaged))
+
+    analyzed = run_deep_analysis(triaged, trade_date, asset_type, max_deep=max_deep)
+    logger.info("Funnel: analyzed -> %d deep reports", len(analyzed))
+
+    report_md, report_csv = build_report(analyzed, trade_date)
+
+    out = FunnelOutput(
+        trade_date=trade_date,
+        universe_size=len(universe),
+        screened=screened,
+        triaged=triaged,
+        analyzed=analyzed,
+        report_md=report_md,
+        report_csv=report_csv,
+    )
+
+    if write:
+        target = out_dir or _default_out_dir(trade_date)
+        os.makedirs(target, exist_ok=True)
+        out.report_path = os.path.join(target, "report.md")
+        out.csv_path = os.path.join(target, "report.csv")
+        with open(out.report_path, "w", encoding="utf-8") as fh:
+            fh.write(report_md)
+        with open(out.csv_path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(report_csv)
+        logger.info("Funnel: report written to %s", out.report_path)
+
+    return out

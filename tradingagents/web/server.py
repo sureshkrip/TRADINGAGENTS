@@ -90,6 +90,64 @@ def _run_job(job_id: str, ticker: str, trade_date: str, asset_type: str) -> None
             )
 
 
+def _run_funnel_job(job_id: str, req: dict) -> None:
+    """Run the full screening funnel (universe -> screen -> triage -> analyze -> report).
+
+    Long-running like ``_run_job`` (it invokes the multi-agent graph per pick),
+    so it runs on the same executor and reports via the same job store. The
+    result keeps the funnel light — stage counts, the ranked picks, and the
+    on-disk report paths — rather than inlining the full write-ups.
+    """
+    with _JOBS_LOCK:
+        _JOBS[job_id].update(status="running", started_at=_now())
+    try:
+        # Lazy import: keep the heavy funnel/agent stack off the app's import path
+        # (same rationale as _get_graph) so /health stays fast and a misconfigured
+        # pipeline fails this job, not the whole web process.
+        from tradingagents.funnel.pipeline import run_funnel
+        from tradingagents.funnel.report import classify_decision
+
+        out = run_funnel(
+            req["date"],
+            req.get("asset_type", "stock"),
+            top_screen=req.get("top_screen"),
+            top_triage=req.get("top_triage"),
+            max_deep=req.get("max_deep"),
+            write=True,
+        )
+        picks = [
+            {
+                "ticker": a.ticker,
+                "bucket": classify_decision(a.decision) if a.error is None else "FAILED",
+                "decision": a.decision,
+                "triage_score": a.triage_score,
+                "screen_score": a.screen_score,
+                "thesis": a.thesis,
+                "red_flag": a.red_flag,
+                "error": a.error,
+            }
+            for a in out.analyzed
+        ]
+        result = {
+            "universe_size": out.universe_size,
+            "screened": len(out.screened),
+            "triaged": len(out.triaged),
+            "analyzed": len(out.analyzed),
+            "report_path": out.report_path,
+            "csv_path": out.csv_path,
+            "picks": picks,
+        }
+        with _JOBS_LOCK:
+            _JOBS[job_id].update(status="done", finished_at=_now(), result=result, error=None)
+    except Exception as exc:
+        with _JOBS_LOCK:
+            _JOBS[job_id].update(
+                status="error",
+                finished_at=_now(),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+
+
 # --- API models ------------------------------------------------------------
 
 class AnalyzeRequest(BaseModel):
@@ -106,6 +164,20 @@ class AnalyzeRequest(BaseModel):
 class AnalyzeAccepted(BaseModel):
     job_id: str
     status: str
+
+
+class FunnelRequest(BaseModel):
+    date: str = Field(
+        ...,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        examples=["2024-05-10"],
+        description="As-of trade date (YYYY-MM-DD) used for every analysis.",
+    )
+    asset_type: Literal["stock", "crypto"] = "stock"
+    # Per-stage cutoffs; None falls back to each stage's TRADINGAGENTS_* default.
+    top_screen: int | None = Field(None, ge=1, description="Stage 0 survivors to keep.")
+    top_triage: int | None = Field(None, ge=1, description="Stage 1 shortlist size.")
+    max_deep: int | None = Field(None, ge=1, description="Hard cap on Stage 2 deep runs.")
 
 
 # --- App -------------------------------------------------------------------
@@ -138,6 +210,40 @@ def analyze(req: AnalyzeRequest) -> AnalyzeAccepted:
         }
     _EXECUTOR.submit(_run_job, job_id, req.ticker, req.date, req.asset_type)
     return AnalyzeAccepted(job_id=job_id, status="queued")
+
+
+@app.post("/funnel", response_model=AnalyzeAccepted, status_code=202)
+def funnel(req: FunnelRequest) -> AnalyzeAccepted:
+    """Queue a full screening-funnel run. Poll ``GET /funnel/{job_id}`` for the result.
+
+    Sources the universe, ranks it with the Stage 0 quant screen, triages the
+    survivors with the cheap LLM, runs the full multi-agent analysis on the
+    shortlist, and writes a ranked Markdown+CSV report. Long-running — the deep
+    stage invokes the agent graph per pick.
+    """
+    job_id = uuid.uuid4().hex
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "job_id": job_id,
+            "kind": "funnel",
+            "status": "queued",
+            "request": req.model_dump(),
+            "created_at": _now(),
+            "result": None,
+            "error": None,
+        }
+    _EXECUTOR.submit(_run_funnel_job, job_id, req.model_dump())
+    return AnalyzeAccepted(job_id=job_id, status="queued")
+
+
+@app.get("/funnel/{job_id}")
+def get_funnel_job(job_id: str) -> dict[str, Any]:
+    """Return a funnel job's status and, once done, its ranked picks + report paths."""
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Unknown job_id")
+        return dict(job)
 
 
 _SUMMARY_FIELDS = (
