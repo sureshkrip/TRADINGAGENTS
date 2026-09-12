@@ -12,8 +12,9 @@ orchestrates the run lives here.
 """
 
 from .batch import AnalysisResult, run_deep_analysis
-from .pipeline import FunnelOutput, run_funnel
+from .pipeline import FunnelOutput, run_funnel, run_theme_funnel
 from .report import build_report, classify_decision
+from .theme import expand_theme, theme_slug
 from .triage import TriageResult, triage_candidates
 
 __all__ = [
@@ -25,4 +26,7 @@ __all__ = [
     "classify_decision",
     "FunnelOutput",
     "run_funnel",
+    "run_theme_funnel",
+    "expand_theme",
+    "theme_slug",
 ]

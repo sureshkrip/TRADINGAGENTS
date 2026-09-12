@@ -115,3 +115,55 @@ def test_runs_route_not_shadowed_by_job_id(client, monkeypatch, tmp_path):
     # "runs" must hit the history endpoint, not be treated as a job_id (404 job).
     monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
     assert client.get("/funnel/runs").status_code == 200
+
+
+def _seed_theme_run(base, slug, date, label, picks):
+    import json
+    import os
+    d = os.path.join(base, "themes", slug, date)
+    os.makedirs(d, exist_ok=True)
+    rec = {"trade_date": date, "label": label, "generated_at": date + "T00:00:00+00:00",
+           "universe": ["AAA"], "universe_size": 1, "screened": 1, "triaged": 1,
+           "analyzed": len(picks), "picks": picks}
+    with open(os.path.join(d, "run.json"), "w", encoding="utf-8") as fh:
+        json.dump(rec, fh)
+
+
+@pytest.mark.unit
+def test_theme_accepted_and_stored_in_request(client):
+    r = client.post("/funnel", json={"date": "2024-05-10", "theme": "data center"})
+    assert r.status_code == 202
+    job = client.get("/funnel/" + r.json()["job_id"]).json()
+    assert job["request"]["theme"] == "data center"
+
+
+@pytest.mark.unit
+def test_list_themes(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    _seed_theme_run(tmp_path, "data-center", "2024-05-10", "data center",
+                    [{"ticker": "NVDA", "bucket": "BUY"}])
+    _seed_theme_run(tmp_path, "cybersecurity", "2024-05-09", "cybersecurity",
+                    [{"ticker": "CRWD", "bucket": "HOLD"}])
+    r = client.get("/funnel/themes")
+    assert r.status_code == 200
+    themes = r.json()["themes"]
+    assert [t["slug"] for t in themes] == ["data-center", "cybersecurity"]  # newest first
+    assert themes[0]["label"] == "data center" and themes[0]["buys"] == 1
+
+
+@pytest.mark.unit
+def test_get_theme_runs_and_record(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    _seed_theme_run(tmp_path, "data-center", "2024-05-10", "data center",
+                    [{"ticker": "NVDA", "bucket": "BUY", "report": "WU"}])
+    assert client.get("/funnel/themes/data-center").json()["runs"] == ["2024-05-10"]
+    rec = client.get("/funnel/themes/data-center/2024-05-10").json()
+    assert rec["label"] == "data center" and rec["picks"][0]["report"] == "WU"
+
+
+@pytest.mark.unit
+def test_theme_endpoints_validate_and_404(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "_funnel_runs_dir", lambda: str(tmp_path))
+    assert client.get("/funnel/themes/BAD_SLUG!").status_code == 400
+    assert client.get("/funnel/themes/missing").status_code == 404
+    assert client.get("/funnel/themes/data-center/not-a-date").status_code == 400

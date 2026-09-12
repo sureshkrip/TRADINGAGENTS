@@ -106,17 +106,26 @@ def _run_funnel_job(job_id: str, req: dict) -> None:
         # Lazy import: keep the heavy funnel/agent stack off the app's import path
         # (same rationale as _get_graph) so /health stays fast and a misconfigured
         # pipeline fails this job, not the whole web process.
-        from tradingagents.funnel.pipeline import run_funnel
+        from tradingagents.funnel.pipeline import run_funnel, run_theme_funnel
         from tradingagents.funnel.report import classify_decision
 
-        out = run_funnel(
-            req["date"],
-            req.get("asset_type", "stock"),
-            top_screen=req.get("top_screen"),
-            top_triage=req.get("top_triage"),
-            max_deep=req.get("max_deep"),
-            write=True,
-        )
+        if req.get("theme"):
+            out = run_theme_funnel(
+                req["theme"],
+                req["date"],
+                max_deep=req.get("max_deep") if req.get("max_deep") is not None else 2,
+                top_triage=req.get("top_triage"),
+                write=True,
+            )
+        else:
+            out = run_funnel(
+                req["date"],
+                req.get("asset_type", "stock"),
+                top_screen=req.get("top_screen"),
+                top_triage=req.get("top_triage"),
+                max_deep=req.get("max_deep"),
+                write=True,
+            )
         picks = [
             {
                 "ticker": a.ticker,
@@ -176,6 +185,10 @@ class FunnelRequest(BaseModel):
         description="As-of trade date (YYYY-MM-DD) used for every analysis.",
     )
     asset_type: Literal["stock", "crypto"] = "stock"
+    theme: str | None = Field(
+        None, min_length=2, max_length=80,
+        description="Run a theme funnel: tickers are discovered from this name (no list needed).",
+    )
     # Per-stage cutoffs; None falls back to each stage's TRADINGAGENTS_* default.
     top_screen: int | None = Field(None, ge=1, description="Stage 0 survivors to keep.")
     top_triage: int | None = Field(None, ge=1, description="Stage 1 shortlist size.")
@@ -285,6 +298,71 @@ def get_funnel_run(date: str) -> dict[str, Any]:
     record = os.path.join(_funnel_runs_dir(), date, "run.json")
     if not os.path.isfile(record):
         raise HTTPException(status_code=404, detail="No run for that date")
+    with open(record, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+_SLUG_RE = re.compile(r"^[a-z0-9-]{1,80}$")
+
+
+def _themes_dir() -> str:
+    return os.path.join(_funnel_runs_dir(), "themes")
+
+
+@app.get("/funnel/themes")
+def list_funnel_themes() -> dict[str, Any]:
+    """List themes that have runs, with their latest run summary (for the UI)."""
+    base = _themes_dir()
+    themes: list[dict[str, Any]] = []
+    if os.path.isdir(base):
+        for slug in os.listdir(base):
+            tdir = os.path.join(base, slug)
+            if not os.path.isdir(tdir):
+                continue
+            dates = sorted(
+                (d for d in os.listdir(tdir) if os.path.isfile(os.path.join(tdir, d, "run.json"))),
+                reverse=True,
+            )
+            if not dates:
+                continue
+            entry = {"slug": slug, "latest": dates[0], "run_count": len(dates)}
+            try:
+                with open(os.path.join(tdir, dates[0], "run.json"), encoding="utf-8") as fh:
+                    data = json.load(fh)
+                entry["label"] = data.get("label") or slug
+                entry["buys"] = sum(1 for p in data.get("picks", []) if p.get("bucket") == "BUY")
+            except (OSError, json.JSONDecodeError):
+                entry["label"] = slug
+            themes.append(entry)
+    themes.sort(key=lambda t: t["latest"], reverse=True)
+    return {"count": len(themes), "themes": themes}
+
+
+@app.get("/funnel/themes/{slug}")
+def get_theme_runs(slug: str) -> dict[str, Any]:
+    """List a theme's run dates (newest first)."""
+    if not _SLUG_RE.match(slug):
+        raise HTTPException(status_code=400, detail="Invalid theme slug")
+    tdir = os.path.join(_themes_dir(), slug)
+    if not os.path.isdir(tdir):
+        raise HTTPException(status_code=404, detail="Unknown theme")
+    dates = sorted(
+        (d for d in os.listdir(tdir) if os.path.isfile(os.path.join(tdir, d, "run.json"))),
+        reverse=True,
+    )
+    return {"slug": slug, "runs": dates}
+
+
+@app.get("/funnel/themes/{slug}/{date}")
+def get_theme_run(slug: str, date: str) -> dict[str, Any]:
+    """Return one theme run's full record (counts + picks + write-ups)."""
+    if not _SLUG_RE.match(slug):
+        raise HTTPException(status_code=400, detail="Invalid theme slug")
+    if not _DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="Invalid date (expected YYYY-MM-DD)")
+    record = os.path.join(_themes_dir(), slug, date, "run.json")
+    if not os.path.isfile(record):
+        raise HTTPException(status_code=404, detail="No run for that theme/date")
     with open(record, encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -439,15 +517,25 @@ _FUNNEL_HTML = """<!doctype html>
   <div><label for="max_deep">Max deep</label><input id="max_deep" type="number" min="1" placeholder="5"></div>
 </div>
 <button id="go">Run funnel</button>
+
+<label for="theme" style="margin-top:1.5rem">Or run a theme — tickers auto-discovered from the name (no list needed)</label>
+<div class="row">
+  <div style="flex:3"><input id="theme" placeholder="e.g. data center, cybersecurity, nuclear SMR"></div>
+  <div><button id="goTheme" style="margin-top:0">Run theme</button></div>
+</div>
+
 <div id="status"></div>
 <div id="results"></div>
 
-<h2>Past runs</h2>
+<h2>Themes</h2>
+<div id="themes" class="muted">Loading…</div>
+
+<h2>Past universe runs</h2>
 <div id="history" class="muted">Loading…</div>
 
 <script>
 const $ = id => document.getElementById(id);
-const status = $('status'), results = $('results'), history = $('history');
+const status = $('status'), results = $('results'), history = $('history'), themes = $('themes');
 const BUCKETS = ['BUY','HOLD','SELL','UNKNOWN','FAILED'];
 const TITLES = {BUY:'✅ Buy / Overweight — the picks', HOLD:'⏸️ Hold / Neutral', SELL:'❌ Sell / Avoid', UNKNOWN:'❔ Unclassified', FAILED:'⚠️ Failed to analyze'};
 
@@ -505,26 +593,61 @@ async function loadHistory(){
   } catch(err){ history.textContent = 'Could not load history.'; }
 }
 
-$('go').onclick = async () => {
-  results.innerHTML = '';
-  const body = { date: $('date').value.trim() };
-  for (const k of ['top_screen','top_triage','max_deep']){ const v = $(k).value.trim(); if (v) body[k] = parseInt(v,10); }
-  status.textContent = 'Submitting…';
-  const r = await fetch('/funnel', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
-  if (!r.ok) { status.textContent = 'Error: ' + r.status + ' ' + await r.text(); return; }
-  const {job_id} = await r.json();
+async function loadThemes(){
+  try {
+    const {themes:list} = await (await fetch('/funnel/themes')).json();
+    if (!list.length){ themes.textContent = 'No theme runs yet — enter a theme above.'; return; }
+    themes.innerHTML = list.map(t =>
+      `<div><a href="#" data-theme="${esc(t.slug)}">${esc(t.label||t.slug)}</a>`
+      + ` <span class="muted">— latest ${esc(t.latest)}, ${t.buys ?? 0} buys, ${t.run_count} run(s)</span></div>`).join('');
+    themes.querySelectorAll('a[data-theme]').forEach(a => a.onclick = async (e) => {
+      e.preventDefault();
+      const slug = a.getAttribute('data-theme');
+      const {runs} = await (await fetch('/funnel/themes/' + slug)).json();
+      if (!runs.length) return;
+      const rec = await (await fetch('/funnel/themes/' + slug + '/' + runs[0]).then(r=>r.json()));
+      status.textContent = 'Showing ' + slug + ' — ' + runs[0];
+      render(rec, (rec.label||slug) + ' — ' + runs[0]);
+    });
+  } catch(err){ themes.textContent = 'Could not load themes.'; }
+}
+
+async function pollJob(job_id, refresh){
   const t0 = Date.now();
   while (true) {
     await new Promise(res => setTimeout(res, 4000));
     const j = await (await fetch('/funnel/' + job_id)).json();
     const mins = Math.floor((Date.now()-t0)/60000), secs = Math.floor((Date.now()-t0)/1000)%60;
-    if (j.status === 'done') { status.textContent = `Done in ${mins}m${secs}s`; render(j.result); loadHistory(); break; }
+    if (j.status === 'done') { status.textContent = `Done in ${mins}m${secs}s`; render(j.result); refresh(); break; }
     if (j.status === 'error') { status.textContent = 'Failed: ' + j.error; break; }
     status.textContent = `Status: ${j.status} … (${mins}m${secs}s) — screening, triaging, then ~minutes per deep analysis`;
   }
+}
+
+async function submitRun(body, refresh){
+  results.innerHTML = ''; status.textContent = 'Submitting…';
+  const r = await fetch('/funnel', {method:'POST', headers:{'content-type':'application/json'}, body: JSON.stringify(body)});
+  if (!r.ok) { status.textContent = 'Error: ' + r.status + ' ' + await r.text(); return; }
+  const {job_id} = await r.json();
+  await pollJob(job_id, refresh);
+}
+
+$('go').onclick = () => {
+  const body = { date: $('date').value.trim() };
+  for (const k of ['top_screen','top_triage','max_deep']){ const v = $(k).value.trim(); if (v) body[k] = parseInt(v,10); }
+  submitRun(body, loadHistory);
+};
+
+$('goTheme').onclick = () => {
+  const theme = $('theme').value.trim();
+  if (!theme){ status.textContent = 'Enter a theme name first.'; return; }
+  const body = { date: $('date').value.trim(), theme };
+  const md = $('max_deep').value.trim(); if (md) body.max_deep = parseInt(md,10);
+  submitRun(body, loadThemes);
 };
 
 loadHistory();
+loadThemes();
 </script>
 </body></html>"""
 
