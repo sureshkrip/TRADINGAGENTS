@@ -103,3 +103,41 @@ def run_funnel(
         logger.info("Funnel: report written to %s", out.report_path)
 
     return out
+
+
+def main() -> None:
+    """Console entry point (``tradingagents-funnel``) — run the funnel for a date.
+
+    Defaults the date to today (UTC) so a scheduled/cron invocation needs no
+    args; override with ``--date`` and the per-stage cutoffs. Prints the report
+    path and a one-line summary.
+    """
+    import argparse
+    from datetime import datetime, timezone
+
+    parser = argparse.ArgumentParser(description="Run the TradingAgents screening funnel.")
+    parser.add_argument("--date", default=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                        help="As-of trade date YYYY-MM-DD (default: today UTC).")
+    parser.add_argument("--asset-type", default="stock", choices=["stock", "crypto"])
+    parser.add_argument("--top-screen", type=int, default=None)
+    parser.add_argument("--top-triage", type=int, default=None)
+    parser.add_argument("--max-deep", type=int, default=None)
+    args = parser.parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    out = run_funnel(
+        args.date,
+        args.asset_type,
+        top_screen=args.top_screen,
+        top_triage=args.top_triage,
+        max_deep=args.max_deep,
+        write=True,
+    )
+    print(
+        f"Funnel {args.date}: universe={out.universe_size} screened={len(out.screened)} "
+        f"triaged={len(out.triaged)} analyzed={len(out.analyzed)}\nreport: {out.report_path}"
+    )
+
+
+if __name__ == "__main__":
+    main()

@@ -55,6 +55,7 @@ web = [
 [project.scripts]
 tradingagents = "cli.main:app"
 tradingagents-web = "tradingagents.web.server:main"
+tradingagents-funnel = "tradingagents.funnel.pipeline:main"
 
 [tool.setuptools.packages.find]
 include = ["tradingagents*", "cli*"]

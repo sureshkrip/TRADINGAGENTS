@@ -203,11 +203,22 @@ def score_frame(
     return results[:top_n] if top_n > 0 else results
 
 
+def _yahoo_symbol(ticker: str) -> str:
+    """Map a class-share ticker to Yahoo's convention: ``BRK.B`` -> ``BRK-B``.
+
+    The universe carries the dotted form (from the S&P/listing sources), but
+    Yahoo uses a dash, so a bare ``BRK.B`` returns no data. We query Yahoo with
+    the dashed symbol and map the result back to the original ticker.
+    """
+    return ticker.replace(".", "-")
+
+
 def _download_prices(tickers: list[str], lookback_days: int) -> dict[str, pd.DataFrame]:
     """Bulk-download recent OHLCV for many tickers, chunked and retried.
 
-    Returns ``{ticker: DataFrame}`` (auto-adjusted close). Missing/delisted
-    names are simply absent. Isolated here so tests can stub the network out.
+    Returns ``{ticker: DataFrame}`` keyed by the *original* ticker (auto-adjusted
+    close). Missing/delisted names are simply absent. Isolated here so tests can
+    stub the network out.
     """
     import yfinance as yf
 
@@ -215,9 +226,11 @@ def _download_prices(tickers: list[str], lookback_days: int) -> dict[str, pd.Dat
     period = f"{max(lookback_days, _MIN_ROWS) + 5}d"
     for i in range(0, len(tickers), _DOWNLOAD_CHUNK):
         chunk = tickers[i : i + _DOWNLOAD_CHUNK]
+        ymap = {t: _yahoo_symbol(t) for t in chunk}  # original -> Yahoo symbol
+        ysyms = list(ymap.values())
         data = yf_retry(
-            lambda c=chunk: yf.download(
-                c,
+            lambda syms=ysyms: yf.download(
+                syms,
                 period=period,
                 interval="1d",
                 group_by="ticker",
@@ -229,11 +242,13 @@ def _download_prices(tickers: list[str], lookback_days: int) -> dict[str, pd.Dat
         if data is None or data.empty:
             continue
         # Single-ticker downloads come back with flat columns; multi-ticker with
-        # a (ticker, field) MultiIndex. Normalize both to per-ticker frames.
+        # a (ticker, field) MultiIndex. Normalize both to per-ticker frames,
+        # re-keyed to the original ticker.
         if isinstance(data.columns, pd.MultiIndex):
-            for t in chunk:
-                if t in data.columns.get_level_values(0):
-                    out[t] = data[t].dropna(how="all")
+            present = set(data.columns.get_level_values(0))
+            for ticker, ysym in ymap.items():
+                if ysym in present:
+                    out[ticker] = data[ysym].dropna(how="all")
         else:
             out[chunk[0]] = data.dropna(how="all")
     return out

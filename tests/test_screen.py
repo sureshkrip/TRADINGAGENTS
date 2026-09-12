@@ -103,6 +103,33 @@ def test_empty_inputs():
 
 
 @pytest.mark.unit
+def test_yahoo_symbol_maps_class_shares():
+    assert sc._yahoo_symbol("BRK.B") == "BRK-B"
+    assert sc._yahoo_symbol("AAPL") == "AAPL"
+
+
+@pytest.mark.unit
+def test_download_prices_requeries_dot_shares_as_dash(monkeypatch):
+    # Yahoo is queried with BRK-B; result must be re-keyed to the original BRK.B.
+    captured = {}
+
+    def fake_download(syms, **kwargs):
+        captured["syms"] = syms
+        cols = pd.MultiIndex.from_product([["BRK-B"], ["Close", "Volume"]])
+        return pd.DataFrame(
+            [[100.0, 1_000_000]] * 5,
+            index=pd.date_range("2024-01-01", periods=5, freq="B"),
+            columns=cols,
+        )
+
+    monkeypatch.setattr("yfinance.download", fake_download)
+    out = sc._download_prices(["BRK.B"], 400)
+    assert captured["syms"] == ["BRK-B"]     # queried with the dashed symbol
+    assert "BRK.B" in out                     # returned under the original ticker
+    assert "Close" in out["BRK.B"].columns
+
+
+@pytest.mark.unit
 def test_screen_universe_end_to_end_with_stubbed_download(monkeypatch):
     def fake_download(tickers, lookback_days):
         out = {}
