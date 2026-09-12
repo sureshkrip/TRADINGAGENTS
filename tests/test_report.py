@@ -38,6 +38,20 @@ def test_classify_decision(text, bucket):
 
 
 @pytest.mark.unit
+def test_stage_detail_helpers():
+    from tradingagents.dataflows.screen import ScreenResult
+    from tradingagents.funnel.report import screened_to_dicts, triaged_to_dicts
+    from tradingagents.funnel.triage import TriageResult
+
+    scr = screened_to_dicts([ScreenResult("AAA", 90.0, {}, {"ret_3m": 0.2, "dollar_vol": 2e7})])
+    assert scr[0]["ticker"] == "AAA" and scr[0]["score"] == 90.0 and scr[0]["ret_3m"] == 0.2
+
+    tri = triaged_to_dicts([TriageResult("AAA", 80.0, "th", "rf", 90.0)])
+    assert tri[0] == {"ticker": "AAA", "triage_score": 80.0, "screen_score": 90.0,
+                      "thesis": "th", "red_flag": "rf"}
+
+
+@pytest.mark.unit
 def test_report_tiers_and_ranks_buys_first():
     results = [
         _res("LOW", "BUY", triage=60),
@@ -95,9 +109,11 @@ def test_empty_results_still_renders():
 
 @pytest.mark.unit
 def test_run_funnel_chains_stages_and_writes(monkeypatch, tmp_path):
+    from tradingagents.dataflows.screen import ScreenResult
+    from tradingagents.funnel.triage import TriageResult
     monkeypatch.setattr(pl, "get_universe", lambda: ["AAA", "BBB", "CCC"])
-    monkeypatch.setattr(pl, "screen_universe", lambda uni, top_n=None: ["s-AAA", "s-BBB"])
-    monkeypatch.setattr(pl, "triage_candidates", lambda scr, top_n=None: ["t-AAA"])
+    monkeypatch.setattr(pl, "screen_universe", lambda uni, top_n=None: [ScreenResult("AAA", 90.0, {}, {})])
+    monkeypatch.setattr(pl, "triage_candidates", lambda scr, top_n=None: [TriageResult("AAA", 88.0, "t", None, 90.0)])
     monkeypatch.setattr(
         pl, "run_deep_analysis",
         lambda tri, date, atype, max_deep=None: [_res("AAA", "BUY", report="WRITEUP-AAA")],
@@ -114,9 +130,19 @@ def test_run_funnel_chains_stages_and_writes(monkeypatch, tmp_path):
 @pytest.mark.unit
 def test_run_funnel_persists_structured_run_json(monkeypatch, tmp_path):
     import json
+
+    from tradingagents.dataflows.screen import ScreenResult
+    from tradingagents.funnel.triage import TriageResult
     monkeypatch.setattr(pl, "get_universe", lambda: ["AAA", "BBB", "CCC"])
-    monkeypatch.setattr(pl, "screen_universe", lambda uni, top_n=None: ["s"])
-    monkeypatch.setattr(pl, "triage_candidates", lambda scr, top_n=None: ["t"])
+    monkeypatch.setattr(
+        pl, "screen_universe",
+        lambda uni, top_n=None: [ScreenResult("AAA", 91.0, {}, {"ret_3m": 0.2, "dollar_vol": 2e7}),
+                                 ScreenResult("BBB", 70.0, {}, {"ret_3m": 0.1, "dollar_vol": 1e7})],
+    )
+    monkeypatch.setattr(
+        pl, "triage_candidates",
+        lambda scr, top_n=None: [TriageResult("AAA", 88.0, "great", None, 91.0)],
+    )
     monkeypatch.setattr(
         pl, "run_deep_analysis",
         lambda tri, date, atype, max_deep=None: [_res("AAA", "BUY", report="WRITEUP-AAA")],
@@ -128,6 +154,11 @@ def test_run_funnel_persists_structured_run_json(monkeypatch, tmp_path):
     pick = rec["picks"][0]
     assert pick["ticker"] == "AAA" and pick["bucket"] == "BUY"
     assert pick["report"] == "WRITEUP-AAA"   # full write-up archived for later viewing
+    # Stage 0 + Stage 1 details archived for the report
+    assert [s["ticker"] for s in rec["screened_detail"]] == ["AAA", "BBB"]
+    assert rec["screened_detail"][0]["score"] == 91.0
+    assert rec["triaged_detail"][0]["ticker"] == "AAA"
+    assert rec["triaged_detail"][0]["triage_score"] == 88.0
 
 
 @pytest.mark.unit

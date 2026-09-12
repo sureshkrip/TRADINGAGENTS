@@ -17,7 +17,12 @@ from datetime import datetime, timezone
 from tradingagents.dataflows.screen import ScreenResult, screen_universe
 from tradingagents.dataflows.universe import get_universe
 from tradingagents.funnel.batch import AnalysisResult, run_deep_analysis
-from tradingagents.funnel.report import build_report, results_to_picks
+from tradingagents.funnel.report import (
+    build_report,
+    results_to_picks,
+    screened_to_dicts,
+    triaged_to_dicts,
+)
 from tradingagents.funnel.theme import expand_theme, theme_slug
 from tradingagents.funnel.triage import TriageResult, triage_candidates
 
@@ -123,6 +128,8 @@ def run_funnel(
             "triaged": len(triaged),
             "analyzed": len(analyzed),
             "picks": results_to_picks(analyzed, include_reports=True),
+            "screened_detail": screened_to_dicts(screened),
+            "triaged_detail": triaged_to_dicts(triaged),
         }
         with open(out.run_json_path, "w", encoding="utf-8") as fh:
             json.dump(record, fh, indent=2)

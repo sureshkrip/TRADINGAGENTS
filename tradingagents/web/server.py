@@ -107,7 +107,11 @@ def _run_funnel_job(job_id: str, req: dict) -> None:
         # (same rationale as _get_graph) so /health stays fast and a misconfigured
         # pipeline fails this job, not the whole web process.
         from tradingagents.funnel.pipeline import run_funnel, run_theme_funnel
-        from tradingagents.funnel.report import classify_decision
+        from tradingagents.funnel.report import (
+            classify_decision,
+            screened_to_dicts,
+            triaged_to_dicts,
+        )
 
         if req.get("theme"):
             out = run_theme_funnel(
@@ -147,6 +151,8 @@ def _run_funnel_job(job_id: str, req: dict) -> None:
             "report_path": out.report_path,
             "csv_path": out.csv_path,
             "picks": picks,
+            "screened_detail": screened_to_dicts(out.screened),
+            "triaged_detail": triaged_to_dicts(out.triaged),
         }
         with _JOBS_LOCK:
             _JOBS[job_id].update(status="done", finished_at=_now(), result=result, error=None)
@@ -570,6 +576,40 @@ function render(result, heading){
     for (const p of withReports)
       html += `<details><summary>${esc(p.ticker)} — ${esc(p.decision||'')}</summary><pre>${esc(p.report)}</pre></details>`;
   }
+
+  // Stage 1 — triaged shortlist (the LLM-scored candidates the deep picks came from)
+  const tri = result.triaged_detail || [];
+  if (tri.length){
+    html += `<h3>Stage 1 — triaged shortlist (${tri.length})</h3><table><thead><tr>`
+      + '<th>#</th><th>Ticker</th><th class="num">Triage</th><th class="num">Screen</th><th>Thesis</th><th>Red flag</th>'
+      + '</tr></thead><tbody>';
+    tri.forEach((t,i) => {
+      html += `<tr><td class="num">${i+1}</td><td class="tick">${esc(t.ticker)}</td>`
+        + `<td class="num">${numOrBlank(t.triage_score)}</td><td class="num">${numOrBlank(t.screen_score)}</td>`
+        + `<td>${esc(t.thesis)}</td><td class="flag">${esc(t.red_flag||'')}</td></tr>`;
+    });
+    html += '</tbody></table>';
+  }
+
+  // Stage 0 — screened universe (quant ranking); collapsed since it can be long
+  const scr = result.screened_detail || [];
+  if (scr.length){
+    let t = '<table><thead><tr><th>#</th><th>Ticker</th><th class="num">Screen</th>'
+      + '<th class="num">3m</th><th class="num">6m</th><th class="num">vs 200sma</th>'
+      + '<th class="num">trend</th><th class="num">$vol(M)</th></tr></thead><tbody>';
+    scr.forEach((s,i) => {
+      const pct = v => (v==null||isNaN(v)) ? '' : (v*100).toFixed(0)+'%';
+      t += `<tr><td class="num">${i+1}</td><td class="tick">${esc(s.ticker)}</td>`
+        + `<td class="num">${numOrBlank(s.score)}</td><td class="num">${pct(s.ret_3m)}</td>`
+        + `<td class="num">${pct(s.ret_6m)}</td><td class="num">${pct(s.above_200sma)}</td>`
+        + `<td class="num">${s.trend_struct ?? ''}</td>`
+        + `<td class="num">${s.dollar_vol==null?'':Math.round(s.dollar_vol/1e6)}</td></tr>`;
+    });
+    t += '</tbody></table>';
+    html += `<h3>Stage 0 — screened universe (${scr.length})</h3>`
+      + `<details><summary>Show ${scr.length} screened stocks (quant-ranked)</summary>${t}</details>`;
+  }
+
   if (result.report_path) html += `<p class="paths muted">Saved to <code>${esc(result.report_path)}</code> (+ .csv, run.json)</p>`;
   results.innerHTML = html;
   window.scrollTo(0,0);

@@ -53,6 +53,37 @@ def results_to_picks(results: list[AnalysisResult], *, include_reports: bool = F
     return picks
 
 
+def screened_to_dicts(screened: list) -> list[dict]:
+    """Stage 0 survivors as JSON rows (ranked): score + the key quant metrics."""
+    rows: list[dict] = []
+    for r in screened:
+        m = getattr(r, "metrics", {}) or {}
+        rows.append({
+            "ticker": r.ticker,
+            "score": r.score,
+            "ret_3m": m.get("ret_3m"),
+            "ret_6m": m.get("ret_6m"),
+            "above_200sma": m.get("above_200sma"),
+            "trend_struct": m.get("trend_struct"),
+            "dollar_vol": m.get("dollar_vol"),
+        })
+    return rows
+
+
+def triaged_to_dicts(triaged: list) -> list[dict]:
+    """Stage 1 shortlist as JSON rows: LLM conviction + thesis + red flag."""
+    return [
+        {
+            "ticker": t.ticker,
+            "triage_score": t.triage_score,
+            "screen_score": t.screen_score,
+            "thesis": t.thesis,
+            "red_flag": t.red_flag,
+        }
+        for t in triaged
+    ]
+
+
 def classify_decision(decision: str | None) -> str:
     """Map a free-text decision to one of BUY / SELL / HOLD / UNKNOWN.
 
