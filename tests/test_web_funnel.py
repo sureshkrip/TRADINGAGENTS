@@ -1,4 +1,4 @@
-"""/funnel endpoint wiring: validation, async accept, status polling, 404.
+"""/funnel and web UI endpoint wiring: validation, async accept, status polling, quote, 404.
 
 Skipped unless the optional ``web`` extra (FastAPI) is installed. The funnel job
 itself is stubbed out so no universe fetch / LLM / graph runs — we're testing the
@@ -61,8 +61,68 @@ def test_funnel_page_served_on_get(client):
 
 
 @pytest.mark.unit
-def test_index_links_to_funnel_page(client):
-    assert 'href="/funnel"' in client.get("/").text
+def test_index_links_to_funnel_page_and_has_google_finance_and_tabs(client):
+    html = client.get("/").text
+    assert 'href="/funnel"' in html
+    assert "Google Finance" in html
+    assert "market_report" in html and "sentiment_report" in html
+
+
+@pytest.mark.unit
+def test_quote_endpoint_returns_google_finance_metadata(client, monkeypatch):
+    import tradingagents.agents.utils.agent_utils as au
+    import tradingagents.dataflows.google_finance as gf
+
+    monkeypatch.setattr(
+        au,
+        "resolve_instrument_identity",
+        lambda sym: {"company_name": "NVIDIA Corporation", "sector": "Technology", "exchange": "NMS"},
+    )
+    monkeypatch.setattr(
+        gf,
+        "fetch_google_finance_quote",
+        lambda sym, exchange=None, timeout=6.0: {
+            "ticker": sym,
+            "name": "NVIDIA Corp",
+            "price": "$138.60",
+            "stats": {"Market cap": "3.39T USD"},
+            "about": "AI chipmaker.",
+            "url": "https://www.google.com/finance/quote/NVDA:NASDAQ?hl=en",
+            "exchange": "NASDAQ",
+        },
+    )
+    r = client.get("/quote/nvda")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ticker"] == "NVDA"
+    assert data["price"] == "$138.60"
+    assert "google.com/finance/quote/NVDA:NASDAQ" in data["google_finance_url"]
+    assert data["stats"]["Market cap"] == "3.39T USD"
+
+
+@pytest.mark.unit
+def test_quote_endpoint_rejects_invalid_symbol(client):
+    assert client.get("/quote/BAD SYMBOL!").status_code == 400
+
+
+@pytest.mark.unit
+def test_extract_reports_populates_all_sections():
+    state = {
+        "market_report": "MKT",
+        "sentiment_report": "SENT",
+        "news_report": "NEWS",
+        "fundamentals_report": "FUND",
+        "investment_plan": "PLAN",
+        "trader_investment_plan": "TRADER",
+        "final_trade_decision": "PM",
+        "investment_debate_state": {"history": "DEBATE"},
+        "risk_debate_state": {"history": "RISK"},
+    }
+    rpts = server._extract_reports(state)
+    assert rpts["market_report"] == "MKT"
+    assert rpts["sentiment_report"] == "SENT"
+    assert rpts["debate_history"] == "DEBATE"
+    assert rpts["risk_history"] == "RISK"
 
 
 def _seed_run(base, date, picks):

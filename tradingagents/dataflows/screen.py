@@ -24,8 +24,11 @@ Factors (weights sum to 1.0):
 
 from __future__ import annotations
 
+import inspect
 import os
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -47,6 +50,11 @@ _WEIGHTS = {"momentum": 0.35, "trend": 0.25, "rel_strength": 0.20, "risk_adj": 0
 
 # Yahoo can be flaky on very large ticker lists; fetch in chunks this size.
 _DOWNLOAD_CHUNK = 100
+
+# Match US single-letter class-share tickers like BRK.B or BF.B without
+# mangling international exchange suffixes (.HK, .NS, .TO, .AX, .SS, .SZ).
+_US_CLASS_SHARE_RE = re.compile(r"^([A-Z]{1,5})\.([A-Z])$")
+_INTL_EXCHANGE_SUFFIXES = frozenset({".T", ".L", ".HK", ".NS", ".BO", ".TO", ".AX", ".SS", ".SZ"})
 
 
 def _env_float(name: str, default: float) -> float:
@@ -204,26 +212,46 @@ def score_frame(
 
 
 def _yahoo_symbol(ticker: str) -> str:
-    """Map a class-share ticker to Yahoo's convention: ``BRK.B`` -> ``BRK-B``.
+    """Map a US class-share ticker to Yahoo's convention: ``BRK.B`` -> ``BRK-B``.
 
     The universe carries the dotted form (from the S&P/listing sources), but
-    Yahoo uses a dash, so a bare ``BRK.B`` returns no data. We query Yahoo with
-    the dashed symbol and map the result back to the original ticker.
+    Yahoo uses a dash, so a bare ``BRK.B`` returns no data. International
+    exchange suffixes (e.g. ``0700.HK``, ``7203.T``, ``AZN.L``) keep their dot.
     """
-    return ticker.replace(".", "-")
+    upper = ticker.strip().upper()
+    for suf in _INTL_EXCHANGE_SUFFIXES:
+        if upper.endswith(suf):
+            return ticker
+    m = _US_CLASS_SHARE_RE.fullmatch(upper)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return ticker
 
 
-def _download_prices(tickers: list[str], lookback_days: int) -> dict[str, pd.DataFrame]:
+def _download_prices(
+    tickers: list[str],
+    lookback_days: int,
+    trade_date: str | None = None,
+) -> dict[str, pd.DataFrame]:
     """Bulk-download recent OHLCV for many tickers, chunked and retried.
 
-    Returns ``{ticker: DataFrame}`` keyed by the *original* ticker (auto-adjusted
-    close). Missing/delisted names are simply absent. Isolated here so tests can
-    stub the network out.
+    When ``trade_date`` (``YYYY-MM-DD``) is given, the download window ends on
+    ``trade_date`` (inclusive) so historical funnel runs do not leak future
+    prices. Returns ``{ticker: DataFrame}`` keyed by the *original* ticker.
     """
     import yfinance as yf
 
     out: dict[str, pd.DataFrame] = {}
-    period = f"{max(lookback_days, _MIN_ROWS) + 5}d"
+    span_days = max(lookback_days, _MIN_ROWS) + 5
+    dl_kwargs: dict[str, str] = {}
+    if trade_date:
+        end_dt = datetime.strptime(trade_date, "%Y-%m-%d") + timedelta(days=1)
+        start_dt = end_dt - timedelta(days=span_days)
+        dl_kwargs["start"] = start_dt.strftime("%Y-%m-%d")
+        dl_kwargs["end"] = end_dt.strftime("%Y-%m-%d")
+    else:
+        dl_kwargs["period"] = f"{span_days}d"
+
     for i in range(0, len(tickers), _DOWNLOAD_CHUNK):
         chunk = tickers[i : i + _DOWNLOAD_CHUNK]
         ymap = {t: _yahoo_symbol(t) for t in chunk}  # original -> Yahoo symbol
@@ -231,12 +259,12 @@ def _download_prices(tickers: list[str], lookback_days: int) -> dict[str, pd.Dat
         data = yf_retry(
             lambda syms=ysyms: yf.download(
                 syms,
-                period=period,
                 interval="1d",
                 group_by="ticker",
                 auto_adjust=True,
                 threads=True,
                 progress=False,
+                **dl_kwargs,
             )
         )
         if data is None or data.empty:
@@ -258,6 +286,7 @@ def screen_universe(
     tickers: list[str],
     *,
     top_n: int | None = None,
+    trade_date: str | None = None,
 ) -> list[ScreenResult]:
     """Rank a universe down to the highest-scoring ``top_n`` names (no LLM).
 
@@ -279,7 +308,10 @@ def screen_universe(
 
     # One bulk fetch for the universe + the benchmark.
     fetch = sorted(set(tickers) | {benchmark})
-    frames = _download_prices(fetch, lookback_days)
+    if trade_date is not None and "trade_date" in inspect.signature(_download_prices).parameters:
+        frames = _download_prices(fetch, lookback_days, trade_date=trade_date)
+    else:
+        frames = _download_prices(fetch, lookback_days)
 
     # Benchmark 3-month return for the relative-strength factor (None if absent).
     benchmark_ret_3m: float | None = None

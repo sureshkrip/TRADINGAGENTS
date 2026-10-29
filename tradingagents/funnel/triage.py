@@ -100,16 +100,42 @@ def _parse_json_array(content: str) -> list[dict]:
     return data if isinstance(data, list) else []
 
 
+def _provider_kwargs_from_config(cfg: dict) -> dict:
+    """Extract provider-specific and cross-provider LLM kwargs from a config dict."""
+    from tradingagents.graph.trading_graph import _coerce_max_retries
+
+    kwargs: dict = {}
+    provider = cfg.get("llm_provider", "").lower()
+    if provider == "google" and cfg.get("google_thinking_level"):
+        kwargs["thinking_level"] = cfg["google_thinking_level"]
+    elif provider == "openai" and cfg.get("openai_reasoning_effort"):
+        kwargs["reasoning_effort"] = cfg["openai_reasoning_effort"]
+    elif provider == "anthropic" and cfg.get("anthropic_effort"):
+        kwargs["effort"] = cfg["anthropic_effort"]
+
+    temperature = cfg.get("temperature")
+    if temperature is not None and temperature != "":
+        kwargs["temperature"] = float(temperature)
+
+    max_retries = cfg.get("llm_max_retries")
+    if max_retries is not None and max_retries != "":
+        kwargs["max_retries"] = _coerce_max_retries(max_retries)
+
+    return kwargs
+
+
 def _build_quick_llm():
     """Construct the configured cheap LLM (same plumbing as the graph)."""
     from tradingagents.default_config import DEFAULT_CONFIG
     from tradingagents.llm_clients import create_llm_client
 
     cfg = DEFAULT_CONFIG
+    kwargs = _provider_kwargs_from_config(cfg)
     client = create_llm_client(
         provider=cfg["llm_provider"],
         model=cfg["quick_think_llm"],
         base_url=cfg.get("backend_url"),
+        **kwargs,
     )
     return client.get_llm()
 

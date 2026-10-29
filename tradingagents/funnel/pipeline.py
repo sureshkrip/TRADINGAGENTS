@@ -8,6 +8,7 @@ per-stage ``top_*`` counts can be overridden per call.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import os
@@ -84,7 +85,10 @@ def run_funnel(
     universe = list(tickers) if tickers is not None else get_universe()
     logger.info("Funnel%s: universe=%d tickers", f" [{label}]" if label else "", len(universe))
 
-    screened = screen_universe(universe, top_n=top_screen)
+    if "trade_date" in inspect.signature(screen_universe).parameters:
+        screened = screen_universe(universe, top_n=top_screen, trade_date=trade_date)
+    else:
+        screened = screen_universe(universe, top_n=top_screen)
     logger.info("Funnel: screened -> %d survivors", len(screened))
 
     triaged = triage_candidates(screened, top_n=top_triage)

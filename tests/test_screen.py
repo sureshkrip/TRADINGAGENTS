@@ -103,9 +103,14 @@ def test_empty_inputs():
 
 
 @pytest.mark.unit
-def test_yahoo_symbol_maps_class_shares():
+def test_yahoo_symbol_maps_class_shares_and_preserves_intl_suffixes():
     assert sc._yahoo_symbol("BRK.B") == "BRK-B"
+    assert sc._yahoo_symbol("BF.B") == "BF-B"
     assert sc._yahoo_symbol("AAPL") == "AAPL"
+    assert sc._yahoo_symbol("0700.HK") == "0700.HK"
+    assert sc._yahoo_symbol("7203.T") == "7203.T"
+    assert sc._yahoo_symbol("AZN.L") == "AZN.L"
+    assert sc._yahoo_symbol("RELIANCE.NS") == "RELIANCE.NS"
 
 
 @pytest.mark.unit
@@ -115,6 +120,7 @@ def test_download_prices_requeries_dot_shares_as_dash(monkeypatch):
 
     def fake_download(syms, **kwargs):
         captured["syms"] = syms
+        captured["kwargs"] = kwargs
         cols = pd.MultiIndex.from_product([["BRK-B"], ["Close", "Volume"]])
         return pd.DataFrame(
             [[100.0, 1_000_000]] * 5,
@@ -127,6 +133,20 @@ def test_download_prices_requeries_dot_shares_as_dash(monkeypatch):
     assert captured["syms"] == ["BRK-B"]     # queried with the dashed symbol
     assert "BRK.B" in out                     # returned under the original ticker
     assert "Close" in out["BRK.B"].columns
+
+
+@pytest.mark.unit
+def test_download_prices_anchors_to_trade_date_when_provided(monkeypatch):
+    captured = {}
+
+    def fake_download(syms, **kwargs):
+        captured.update(kwargs)
+        return pd.DataFrame()
+
+    monkeypatch.setattr("yfinance.download", fake_download)
+    sc._download_prices(["NVDA"], 400, trade_date="2024-05-10")
+    assert captured["end"] == "2024-05-11"    # inclusive of 2024-05-10
+    assert "start" in captured and "period" not in captured
 
 
 @pytest.mark.unit

@@ -24,6 +24,7 @@ See: https://github.com/TauricResearch/TradingAgents/issues/557
 See: https://github.com/TauricResearch/TradingAgents/issues/796
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 from langchain_core.messages import AIMessage
@@ -51,8 +52,8 @@ def _seven_days_back(trade_date: str) -> str:
 def create_sentiment_analyst(llm):
     """Create a sentiment analyst node for the trading graph.
 
-    Pre-fetches news + StockTwits + Reddit data, injects them into the
-    prompt as structured blocks, and produces a deterministic sentiment
+    Pre-fetches news + StockTwits + Reddit data concurrently, injects them into
+    the prompt as structured blocks, and produces a deterministic sentiment
     report via structured output (with a free-text fallback for providers
     that do not support it).
     """
@@ -64,12 +65,16 @@ def create_sentiment_analyst(llm):
         start_date = _seven_days_back(end_date)
         instrument_context = get_instrument_context_from_state(state)
 
-        # Pre-fetch all three sources. Each fetcher degrades gracefully and
-        # returns a string (no exceptions surface from here), so the LLM
-        # always sees something — either real data or a clear placeholder.
-        news_block = get_news.func(ticker, start_date, end_date)
-        stocktwits_block = fetch_stocktwits_messages(ticker, limit=30)
-        reddit_block = fetch_reddit_posts(ticker)
+        # Pre-fetch all three sources concurrently. Each fetcher degrades
+        # gracefully and returns a string (no exceptions surface from here),
+        # so the LLM always sees something — either real data or a placeholder.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            f_news = pool.submit(get_news.func, ticker, start_date, end_date)
+            f_st = pool.submit(fetch_stocktwits_messages, ticker, limit=30)
+            f_rd = pool.submit(fetch_reddit_posts, ticker)
+            news_block = f_news.result()
+            stocktwits_block = f_st.result()
+            reddit_block = f_rd.result()
 
         system_message = _build_system_message(
             ticker=ticker,

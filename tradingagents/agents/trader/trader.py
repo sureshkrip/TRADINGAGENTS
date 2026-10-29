@@ -26,6 +26,22 @@ def create_trader(llm):
         instrument_context = get_instrument_context_from_state(state)
         investment_plan = state["investment_plan"]
 
+        analyst_sections = []
+        for label, key in (
+            ("Market Research Report", "market_report"),
+            ("Social Media Sentiment Report", "sentiment_report"),
+            ("Latest World Affairs News", "news_report"),
+            ("Company Fundamentals Report", "fundamentals_report"),
+        ):
+            val = state.get(key)
+            if val:
+                analyst_sections.append(f"### {label}\n{val}")
+        analyst_block = (
+            "\n\nAnalyst Reports:\n" + "\n\n".join(analyst_sections)
+            if analyst_sections
+            else ""
+        )
+
         messages = [
             {
                 "role": "system",
@@ -44,7 +60,8 @@ def create_trader(llm):
                     f"plan tailored for {company_name}. {instrument_context} This plan incorporates "
                     f"insights from current technical market trends, macroeconomic indicators, and "
                     f"social media sentiment. Use this plan as a foundation for evaluating your next "
-                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}\n\n"
+                    f"trading decision.\n\nProposed Investment Plan: {investment_plan}"
+                    f"{analyst_block}\n\n"
                     f"Leverage these insights to make an informed and strategic decision."
                 ),
             },
